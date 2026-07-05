@@ -12,6 +12,8 @@ guides linked at the bottom of each entry.
 
 ## [Unreleased]
 
+## [1.0.120] - 2026-07-05
+
 ### Fixed
 
 - CI's publish workflow still ran restore/build/pack from a `working-directory: ./src` override left over from before `Cirreum.Startup.slnx` moved to the repo root — broke the `1.0.119` publish (`MSB1009`, project file not found). No effect on the package itself; this release exists to re-trigger a working publish run.
