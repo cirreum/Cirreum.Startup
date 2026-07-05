@@ -12,6 +12,8 @@ guides linked at the bottom of each entry.
 
 ## [Unreleased]
 
+## [1.0.119] - 2026-07-05
+
 ### Fixed
 
 - `AddServicesFor<IAutoInitialize>`'s primary-interface naming rule stripped every capital `I` in an interface name, not just the conventional leading one — a mid-name capital `I` (e.g. `IFooInitializer`) could never match its own class name, causing a conventionally-named `FooInitializer : IFooInitializer` to throw at startup. Now strips only the leading `I`, guarded by the `I{Upper}` convention.
