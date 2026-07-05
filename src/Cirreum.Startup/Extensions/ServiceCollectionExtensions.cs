@@ -1,4 +1,4 @@
-﻿namespace Microsoft.Extensions.DependencyInjection;
+namespace Microsoft.Extensions.DependencyInjection;
 
 using Cirreum.Startup;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -12,6 +12,7 @@ using System.Reflection;
 /// </summary>
 public static class ServiceCollectionExtensions {
 
+	private static readonly Lock AutoInitializeLock = new();
 	internal static List<Type> AutoInitializeServices = [];
 
 	/// <summary>
@@ -52,7 +53,11 @@ public static class ServiceCollectionExtensions {
 	/// <param name="sp">The <see cref="IServiceProvider"/> that will provide the service implementations.</param>
 	/// <returns>The enumerable collection of services.</returns>
 	public static IEnumerable<IAutoInitialize> GetAutoInitializeServices(this IServiceProvider sp) {
-		foreach (var svc in AutoInitializeServices) {
+		Type[] snapshot;
+		lock (AutoInitializeLock) {
+			snapshot = [.. AutoInitializeServices];
+		}
+		foreach (var svc in snapshot) {
 			var castedSvc = sp.GetRequiredService(svc) as IAutoInitialize;
 			if (castedSvc is not null) {
 				yield return castedSvc;
@@ -65,7 +70,9 @@ public static class ServiceCollectionExtensions {
 	/// being tracked for initialization.
 	/// </summary>
 	public static void ClearAutoInitializeServices(this IServiceProvider _) {
-		AutoInitializeServices.Clear();
+		lock (AutoInitializeLock) {
+			AutoInitializeServices.Clear();
+		}
 	}
 
 
@@ -79,13 +86,21 @@ public static class ServiceCollectionExtensions {
 
 			if (isAutoInitService) {
 
-				var foundSvcDescriptor = services.FirstOrDefault(d => d.IsKeyedService is false && d.ImplementationType is not null && d.ImplementationType.Equals(implementationType));
+				var foundSvcDescriptor = services.FirstOrDefault(d =>
+					d.IsKeyedService is false &&
+					(
+						(d.ImplementationType is not null && d.ImplementationType.Equals(implementationType)) ||
+						((d.ImplementationFactory is not null || d.ImplementationInstance is not null) && d.ServiceType.IsAssignableFrom(implementationType))
+					));
+
 				if (foundSvcDescriptor is not null) {
 #if DEBUG
 					Console.WriteLine($"Found existing registered service ({foundSvcDescriptor.ServiceType.Name}) for {implementationType.Name}, and will use it!");
 					Console.WriteLine($"	Tracking {foundSvcDescriptor.ServiceType.Name} for auto-initialization...");
 #endif
-					AutoInitializeServices.Add(foundSvcDescriptor.ServiceType);
+					lock (AutoInitializeLock) {
+						AutoInitializeServices.Add(foundSvcDescriptor.ServiceType);
+					}
 
 				} else {
 #if DEBUG
@@ -97,10 +112,10 @@ public static class ServiceCollectionExtensions {
 						Console.WriteLine($"	{item.Name}");
 					}
 #endif
-					var primaryInterface = primaryInterfaces
-						.FirstOrDefault(i => implementationType.Name.Contains(i.Name.Replace("I", ""))) ??
+					var primaryInterface = FindPrimaryInterface(implementationType, serviceType, primaryInterfaces) ??
 						throw new Exception(
-							$"Cannot register {implementationType.Name} without a properly named primary interface.");
+							$"Cannot register {implementationType.Name} without a properly named primary interface. " +
+							$"Candidates considered: {string.Join(", ", primaryInterfaces.Select(i => i.Name))}.");
 
 #if DEBUG
 					Console.WriteLine($"			{primaryInterface.Name} chosen as the service interface to register.");
@@ -113,7 +128,9 @@ public static class ServiceCollectionExtensions {
 #if DEBUG
 					Console.WriteLine($"	Tracking {primaryInterface.Name} for auto-initialization...");
 #endif
-					AutoInitializeServices.Add(primaryInterface);
+					lock (AutoInitializeLock) {
+						AutoInitializeServices.Add(primaryInterface);
+					}
 
 				}
 
@@ -134,6 +151,38 @@ public static class ServiceCollectionExtensions {
 		return services;
 
 	}
+
+	/// <summary>
+	/// Chooses the interface a discovered <paramref name="implementationType"/> should be
+	/// registered under: an interface named to match the class (e.g. <c>FooInitializer</c> →
+	/// <c>IFooInitializer</c>), preferring one that itself derives from
+	/// <paramref name="serviceType"/> (e.g. <c>IThemeMonitor : IAutoInitialize</c>) when both a
+	/// derived and a non-derived candidate match by name.
+	/// </summary>
+	private static Type? FindPrimaryInterface(Type implementationType, Type serviceType, IReadOnlyCollection<Type> candidates) {
+
+		bool NameMatches(Type i) => implementationType.Name.Contains(StrippedInterfaceName(i));
+
+		var derivedFromMarker = candidates.Where(i => i != serviceType && serviceType.IsAssignableFrom(i));
+
+		return derivedFromMarker.FirstOrDefault(NameMatches) ?? candidates.FirstOrDefault(NameMatches);
+
+	}
+
+	/// <summary>
+	/// Strips the conventional leading <c>I</c> from an interface name (e.g.
+	/// <c>IFooInitializer</c> → <c>FooInitializer</c>) for matching against an implementation's
+	/// class name. Only strips the leading character — a mid-name capital <c>I</c> (e.g. the
+	/// <c>I</c> in <c>Initializer</c>) is left alone, unlike a naive <c>Replace("I", "")</c>
+	/// over the whole name.
+	/// </summary>
+	private static string StrippedInterfaceName(Type interfaceType) {
+		var name = interfaceType.Name;
+		return name.Length > 1 && name[0] == 'I' && char.IsUpper(name[1])
+			? name[1..]
+			: name;
+	}
+
 	private static IEnumerable<Type> DiscoverServiceImplementations(Type serviceType) {
 
 		var seenNames = new HashSet<string>();
