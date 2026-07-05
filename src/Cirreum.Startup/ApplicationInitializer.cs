@@ -28,7 +28,7 @@ internal class ApplicationInitializer(
 	private const string InitializerCategoryStartup = "startup";
 
 	private const string ActivityName = nameof(InitializeApplication);
-	private readonly ActivitySource _activitySource = new(LibName);
+	private static readonly ActivitySource _activitySource = new(LibName);
 
 	/// <summary>
 	/// Runs the complete initialization sequence: System initializers, Auto initializers, and Startup tasks.
@@ -36,7 +36,7 @@ internal class ApplicationInitializer(
 	/// <returns>A ValueTask representing the asynchronous operation.</returns>
 	public async ValueTask InitializeApplication() {
 
-		using var initActivity = this._activitySource.StartActivity(ActivityName);
+		using var initActivity = _activitySource.StartActivity(ActivityName);
 
 		using var scope = logger.BeginScope(ActivityName);
 		logger.LogInitializationStarting();
@@ -80,7 +80,7 @@ internal class ApplicationInitializer(
 			foreach (var svc in svcs) {
 				var initializerType = svc.GetType();
 				logger.LogRunSystemInitializer(initializerType.Name);
-				using var initActivity = this._activitySource.StartActivity(
+				using var initActivity = _activitySource.StartActivity(
 					initializerType.Name,
 					ActivityKind.Internal,
 					Activity.Current?.Context ?? new ActivityContext(),
@@ -113,7 +113,7 @@ internal class ApplicationInitializer(
 			foreach (var svc in svcs) {
 				var initializerType = svc.GetType();
 				logger.LogAutoInitializingService(initializerType.Name);
-				using var initActivity = this._activitySource.StartActivity(
+				using var initActivity = _activitySource.StartActivity(
 					initializerType.Name,
 					ActivityKind.Internal,
 					Activity.Current?.Context ?? new ActivityContext(),
@@ -147,7 +147,7 @@ internal class ApplicationInitializer(
 			foreach (var svc in svcs.OrderBy(s => s.Order)) {
 				var initializerType = svc.GetType();
 				logger.LogExecutingStartupTask(initializerType.Name, svc.Order);
-				using var initActivity = this._activitySource.StartActivity(
+				using var initActivity = _activitySource.StartActivity(
 					initializerType.Name,
 					ActivityKind.Internal,
 					Activity.Current?.Context ?? new ActivityContext(),
