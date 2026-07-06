@@ -33,6 +33,10 @@ internal sealed class GadgetProbe : IGadgetProbe, IAutoInitialize {
 /// scan; used as a non-conforming replacement/factory product.</summary>
 internal sealed class PlainGadgetProbe : IGadgetProbe;
 
+/// <summary>Non-conforming, scan-invisible implementation of the sweep-test interface —
+/// used to shadow a marked registration for the cardinality tests.</summary>
+internal sealed class PlainScopedWidget : IScopedWidget;
+
 /// <summary>Abstract implementer — the scan must ignore it. Its presence in this
 /// assembly is itself a regression guard: before the IsAbstract fix, discovery
 /// selected it and every AddApplicationInitializers call failed.</summary>

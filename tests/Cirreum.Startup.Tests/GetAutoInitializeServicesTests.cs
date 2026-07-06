@@ -1,6 +1,5 @@
 namespace Cirreum.Startup.Tests;
 
-using Cirreum.Startup;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -69,7 +68,7 @@ public class GetAutoInitializeServicesTests {
 	[Fact]
 	public void RemovedRegistration_FailsLoudly_NamingTheTrackedType() {
 		using var provider = BuildWithInitializers(services =>
-			services.RemoveAll(typeof(IContainerProbe)));
+			services.RemoveAll<IContainerProbe>());
 
 		var act = () => provider.GetAutoInitializeServices();
 
@@ -80,7 +79,7 @@ public class GetAutoInitializeServicesTests {
 	[Fact]
 	public void ReplacedWithNonConformingImplementation_FailsLoudly() {
 		using var provider = BuildWithInitializers(services =>
-			services.Replace(ServiceDescriptor.Singleton(typeof(IGadgetProbe), typeof(PlainGadgetProbe))));
+			services.Replace(ServiceDescriptor.Singleton<IGadgetProbe, PlainGadgetProbe>()));
 
 		var act = () => provider.GetAutoInitializeServices();
 
@@ -151,6 +150,54 @@ public class GetAutoInitializeServicesTests {
 
 		act.Should().NotThrow();
 		act().OfType<ScopedWidget<object>>().Should().BeEmpty();
+	}
+
+	[Fact]
+	public void SingleSlot_InterfaceCarriedMarker_TwoRegistrations_FailsLoudlyAtCapture() {
+		// IWidgetMonitor : IAutoInitialize declares a single-slot lifecycle contract;
+		// two registrations of it is a composition error, caught at capture — not
+		// last-one-wins, not initialize-both.
+		var services = new ServiceCollection();
+		services.AddSingleton<IWidgetMonitor, WidgetMonitorAlpha<object>>();
+		services.AddSingleton<IWidgetMonitor, WidgetMonitorBeta<object>>();
+
+		var act = () => services.AddApplicationInitializers();
+
+		act.Should().Throw<InvalidOperationException>()
+			.WithMessage($"*{typeof(IWidgetMonitor).FullName}*single-slot*");
+	}
+
+	[Fact]
+	public void SingleSlot_MarkedRegistrationShadowedByAnother_FailsLoudlyAtCapture() {
+		// A marked instance shadowed by a later unmarked registration: the marked
+		// service could never be reached by single resolution — loud, not silent.
+		var services = new ServiceCollection();
+		services.AddSingleton<IScopedWidget>(new ScopedWidget<object>());
+		services.AddSingleton<IScopedWidget, PlainScopedWidget>();
+
+		var act = () => services.AddApplicationInitializers();
+
+		act.Should().Throw<InvalidOperationException>()
+			.WithMessage($"*{typeof(IScopedWidget).FullName}*single-slot*");
+	}
+
+	[Fact]
+	public void SingleSlot_MultipleMarkedImplementations_EachUnderItsOwnIdentity_AllInitialize() {
+		// The sanctioned shape for "multiple services, all auto-initialized": each
+		// marked implementation has its own service identity and is resolved
+		// individually.
+		var services = new ServiceCollection();
+		services.AddSingleton<IWidgetMonitor, WidgetMonitorAlpha<object>>();
+		var scopedWidget = new ScopedWidget<object>();
+		services.AddSingleton<IScopedWidget>(scopedWidget);
+		services.AddApplicationInitializers();
+		using var provider = services.BuildServiceProvider();
+
+		var resolved = provider.GetAutoInitializeServices().ToList();
+
+		resolved.OfType<WidgetMonitorAlpha<object>>().Should().ContainSingle()
+			.Which.Should().BeSameAs(provider.GetRequiredService<IWidgetMonitor>());
+		resolved.Should().Contain(scopedWidget);
 	}
 
 	[Fact]

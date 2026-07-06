@@ -24,8 +24,9 @@ Cirreum.Startup allows developers to define one or more classes that implement s
 - Purpose: Allows existing services to be automatically initialized during application startup.
 - Execution Order: Runs after ISystemInitializer and before IStartupTask.
 - Usage: Useful for services that need initialization before they can be used.
-- Auto-registration: The system attempts to auto-register services implementing this interface — a registration your application already made always wins and is used as-is. Place the marker on the implementation (recommended) or on its paired service interface.
+- Auto-registration: The system attempts to auto-register services implementing this interface — a registration your application already made always wins and is used as-is. Place the marker on the implementation (recommended — it keeps `InitializeAsync` off the consumer-facing contract) or on its paired service interface. Non-conventional naming (the implementation name doesn't contain the interface name) requires manual registration; the scan fails loudly otherwise.
 - Initialization: Regardless of how a service was registered — auto-registered or registered manually — any registration that visibly carries `IAutoInitialize` (on its service type, implementation type, or registered instance) is initialized at startup. A factory registration is only visible when the marker is on the service interface.
+- Single-slot: An auto-initialized service identity has exactly one registration — the one that resolves. Multiple marked implementations each get their own service identity and are resolved individually; more than one registration of a tracked identity fails loudly at composition time. Set-style services consumed as `IEnumerable<T>` are initialized by their owning host, not by auto-initialization.
 - Fail-fast: A tracked service that no longer resolves to an `IAutoInitialize` at startup (its registration was removed or replaced) fails the host with an actionable error rather than being silently skipped. To deliberately opt a container out of auto-initialization, call `ClearAutoInitializeServices()` on its service provider.
 
 ### 3. IStartupTask

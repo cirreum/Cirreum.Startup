@@ -154,49 +154,78 @@ public static class ServiceCollectionExtensions {
 	/// <summary>
 	/// The second half of the auto-initialize contract: regardless of <em>how</em> a
 	/// service was registered — auto-registered by the discovery scan above, or manually
-	/// by the application — any effective registration that visibly carries the marker
+	/// by the application — any registration that visibly carries the marker
 	/// participates in initialization. The scan covers discoverable implementations;
 	/// this sweep covers manual registrations the scan cannot see (closed generics,
-	/// instances, marker-carrying service interfaces).
+	/// instances, marker-carrying service interfaces). It also enforces the single-slot
+	/// cardinality rule for every tracked identity (ADR-0028).
 	/// </summary>
 	/// <remarks>
+	/// <para>
 	/// "Visibly" means the marker is provable at composition time: on the registered
 	/// service type, on the descriptor's implementation type, or implemented by its
 	/// instance. A factory registration whose service type does not carry the marker is
 	/// unvettable here — place the marker on the service interface (or register the
-	/// implementation type) for factory shapes to participate. Only the effective
-	/// registration per service type is considered (the one single resolution returns),
-	/// and keyed or open-generic registrations are out of scope — they cannot be
-	/// resolved by bare service type.
+	/// implementation type) for factory shapes to participate. Keyed and open-generic
+	/// registrations are out of scope — they cannot be resolved by bare service type.
+	/// </para>
+	/// <para>
+	/// <strong>Single-slot cardinality:</strong> an auto-initialized service identity
+	/// must have exactly one registration — the one that resolves. Multiple marked
+	/// implementations each get their own service identity and are resolved
+	/// individually; set-style services (<c>IEnumerable&lt;T&gt;</c> consumption) are
+	/// initialized by their owning host, never by auto-initialization. A tracked
+	/// identity with more than one registration fails here, loudly, at composition time.
+	/// </para>
 	/// </remarks>
+	/// <exception cref="InvalidOperationException">A tracked service identity has more
+	/// than one registration in this collection.</exception>
 	internal static void TrackMarkedRegistrations(this IServiceCollection services, Type serviceType) {
 
 		var manifest = GetOrAddManifest(services);
 
-		// Last registration per service type wins single resolution — evaluate the
-		// marker on that descriptor only, so a shadowed registration can't cause a
-		// tracked type to resolve to something the sweep never vetted.
-		var effectiveRegistrations = new Dictionary<Type, ServiceDescriptor>();
+		// One pass: count registrations per service type, and note every service type
+		// whose registration visibly carries the marker.
+		var registrationCounts = new Dictionary<Type, int>();
+		var markedTypes = new HashSet<Type>();
 		foreach (var descriptor in services) {
-			if (descriptor.IsKeyedService || descriptor.ServiceType.IsGenericTypeDefinition) {
+			if (descriptor.IsKeyedService
+				|| descriptor.ServiceType.IsGenericTypeDefinition
+				|| descriptor.ServiceType == typeof(AutoInitializeManifest)) {
 				continue;
 			}
-			effectiveRegistrations[descriptor.ServiceType] = descriptor;
-		}
-
-		foreach (var (registeredType, descriptor) in effectiveRegistrations) {
-			if (registeredType == typeof(AutoInitializeManifest)) {
-				continue;
-			}
+			registrationCounts[descriptor.ServiceType] =
+				registrationCounts.GetValueOrDefault(descriptor.ServiceType) + 1;
 			var carriesMarker =
-				serviceType.IsAssignableFrom(registeredType)
+				serviceType.IsAssignableFrom(descriptor.ServiceType)
 				|| (descriptor.ImplementationType is { } implementationType && serviceType.IsAssignableFrom(implementationType))
 				|| (descriptor.ImplementationInstance is { } instance && serviceType.IsInstanceOfType(instance));
 			if (carriesMarker) {
+				markedTypes.Add(descriptor.ServiceType);
+			}
+		}
+
+		foreach (var markedType in markedTypes) {
 #if DEBUG
-				Console.WriteLine($"	Tracking {registeredType.Name} for auto-initialization (marked registration)...");
+			Console.WriteLine($"	Tracking {markedType.Name} for auto-initialization (marked registration)...");
 #endif
-				manifest.Track(registeredType);
+			manifest.Track(markedType);
+		}
+
+		// Single-slot cardinality over EVERY tracked identity — including ones tracked
+		// by the discovery paths above (e.g. a factory registration the sweep itself
+		// cannot vet). Fail at capture, where the fix is a composition edit, rather
+		// than initializing an arbitrary one (or all) of an ambiguous set.
+		foreach (var trackedType in manifest.Snapshot()) {
+			if (registrationCounts.GetValueOrDefault(trackedType) > 1) {
+				throw new InvalidOperationException(
+					$"Auto-initialization tracked '{trackedType.FullName}', but it has " +
+					$"{registrationCounts[trackedType]} registrations in this container. " +
+					"Auto-initialized services are single-slot: exactly one registration per " +
+					"service identity. Give each marked implementation its own service identity " +
+					"(its own interface, or a self-registration), or remove the extra " +
+					"registrations. Set-style services consumed as IEnumerable<T> are " +
+					"initialized by their owning host, not by auto-initialization.");
 			}
 		}
 	}
@@ -256,9 +285,12 @@ public static class ServiceCollectionExtensions {
 		}
 #endif
 		var primaryInterface = FindPrimaryInterface(implementationType, serviceType, primaryInterfaces) ??
-			throw new Exception(
-				$"Cannot register {implementationType.Name} without a properly named primary interface. " +
-				$"Candidates considered: {string.Join(", ", primaryInterfaces.Select(i => i.Name))}.");
+			throw new InvalidOperationException(
+				$"Cannot auto-register {implementationType.FullName}: no conventionally-named primary " +
+				$"interface was found (for IMyService, the implementation should be named MyService). " +
+				$"Candidates considered: {string.Join(", ", primaryInterfaces.Select(i => i.Name))}. " +
+				"Register the service manually before AddApplicationInitializers() — the try-first " +
+				"scan honors an existing registration and still auto-initializes it.");
 
 #if DEBUG
 		Console.WriteLine($"			{primaryInterface.Name} chosen as the service interface to register.");
