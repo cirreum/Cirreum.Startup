@@ -40,6 +40,21 @@ internal abstract class AbstractAutoInitializeBase : IAutoInitialize {
 	public abstract ValueTask InitializeAsync();
 }
 
+/// <summary>The original IAutoInitialize use case: an existing interface/impl service
+/// pair whose consumer-facing interface stays clean — the marker lives on the impl and
+/// InitializeAsync is EXPLICITLY implemented, so consumers of the service interface
+/// never see it.</summary>
+internal interface IMyCoolService;
+
+/// <inheritdoc cref="IMyCoolService"/>
+internal sealed class MyCoolService : IMyCoolService, IAutoInitialize {
+	public int InitializeCount;
+	ValueTask IAutoInitialize.InitializeAsync() {
+		this.InitializeCount++;
+		return ValueTask.CompletedTask;
+	}
+}
+
 /// <summary>Sweep-test family: the interface does NOT carry the marker and its only
 /// implementation is an open generic (scan-invisible), so nothing but the
 /// marked-registration sweep can ever track it.</summary>
