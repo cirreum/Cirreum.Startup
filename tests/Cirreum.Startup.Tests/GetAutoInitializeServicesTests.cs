@@ -98,6 +98,62 @@ public class GetAutoInitializeServicesTests {
 	}
 
 	[Fact]
+	public void ManualRegistration_InvisibleToTheScan_MarkerOnInterface_IsStillInitialized() {
+		// The scan cannot see WidgetMonitorAlpha<T> (open generic), but the app
+		// registered it manually and IWidgetMonitor carries the marker — purpose #2:
+		// any marked registration participates, regardless of how it was registered.
+		var services = new ServiceCollection();
+		services.AddSingleton<IWidgetMonitor, WidgetMonitorAlpha<object>>();
+		services.AddApplicationInitializers();
+		using var provider = services.BuildServiceProvider();
+
+		provider.GetAutoInitializeServices().OfType<WidgetMonitorAlpha<object>>()
+			.Should().ContainSingle()
+			.Which.Should().BeSameAs(provider.GetRequiredService<IWidgetMonitor>());
+	}
+
+	[Fact]
+	public void ManualInstanceRegistration_MarkerOnImplementationOnly_IsStillInitialized() {
+		// Neither the service type (IScopedWidget) nor a scannable implementation
+		// carries the marker — only the registered INSTANCE does. The sweep vets the
+		// instance itself.
+		var services = new ServiceCollection();
+		var widget = new ScopedWidget<object>();
+		services.AddSingleton<IScopedWidget>(widget);
+		services.AddApplicationInitializers();
+		using var provider = services.BuildServiceProvider();
+
+		provider.GetAutoInitializeServices().Should().Contain(widget);
+	}
+
+	[Fact]
+	public void ManualFactoryRegistration_MarkerOnServiceInterface_IsStillInitialized() {
+		var services = new ServiceCollection();
+		services.AddSingleton<IWidgetMonitor>(_ => new WidgetMonitorBeta<object>());
+		services.AddApplicationInitializers();
+		using var provider = services.BuildServiceProvider();
+
+		provider.GetAutoInitializeServices().OfType<WidgetMonitorBeta<object>>()
+			.Should().ContainSingle();
+	}
+
+	[Fact]
+	public void ManualFactoryRegistration_MarkerNotVisibleAtComposition_IsNotTracked() {
+		// The known, documented limit: a factory for a marker-less service type is
+		// unvettable at composition time — it neither initializes nor fails the host.
+		// Guidance: carry the marker on the service interface for factory shapes.
+		var services = new ServiceCollection();
+		services.AddSingleton<IScopedWidget>(_ => new ScopedWidget<object>());
+		services.AddApplicationInitializers();
+		using var provider = services.BuildServiceProvider();
+
+		var act = () => provider.GetAutoInitializeServices();
+
+		act.Should().NotThrow();
+		act().OfType<ScopedWidget<object>>().Should().BeEmpty();
+	}
+
+	[Fact]
 	public void AbstractImplementations_AreExcludedFromTheScan() {
 		var services = new ServiceCollection();
 

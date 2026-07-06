@@ -40,6 +40,16 @@ internal abstract class AbstractAutoInitializeBase : IAutoInitialize {
 	public abstract ValueTask InitializeAsync();
 }
 
+/// <summary>Sweep-test family: the interface does NOT carry the marker and its only
+/// implementation is an open generic (scan-invisible), so nothing but the
+/// marked-registration sweep can ever track it.</summary>
+internal interface IScopedWidget;
+
+/// <inheritdoc cref="IScopedWidget"/>
+internal sealed class ScopedWidget<T> : IScopedWidget, IAutoInitialize {
+	public ValueTask InitializeAsync() => ValueTask.CompletedTask;
+}
+
 /// <summary>Seam-test family: open generics are invisible to the scan, so the closed
 /// forms can be fed to RegisterAutoInitializeCandidate directly without poisoning the
 /// discovery-driven tests.</summary>

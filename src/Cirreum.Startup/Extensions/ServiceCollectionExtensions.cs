@@ -143,8 +143,62 @@ public static class ServiceCollectionExtensions {
 
 		}
 
+		if (isAutoInitService) {
+			services.TrackMarkedRegistrations(serviceType);
+		}
+
 		return services;
 
+	}
+
+	/// <summary>
+	/// The second half of the auto-initialize contract: regardless of <em>how</em> a
+	/// service was registered — auto-registered by the discovery scan above, or manually
+	/// by the application — any effective registration that visibly carries the marker
+	/// participates in initialization. The scan covers discoverable implementations;
+	/// this sweep covers manual registrations the scan cannot see (closed generics,
+	/// instances, marker-carrying service interfaces).
+	/// </summary>
+	/// <remarks>
+	/// "Visibly" means the marker is provable at composition time: on the registered
+	/// service type, on the descriptor's implementation type, or implemented by its
+	/// instance. A factory registration whose service type does not carry the marker is
+	/// unvettable here — place the marker on the service interface (or register the
+	/// implementation type) for factory shapes to participate. Only the effective
+	/// registration per service type is considered (the one single resolution returns),
+	/// and keyed or open-generic registrations are out of scope — they cannot be
+	/// resolved by bare service type.
+	/// </remarks>
+	internal static void TrackMarkedRegistrations(this IServiceCollection services, Type serviceType) {
+
+		var manifest = GetOrAddManifest(services);
+
+		// Last registration per service type wins single resolution — evaluate the
+		// marker on that descriptor only, so a shadowed registration can't cause a
+		// tracked type to resolve to something the sweep never vetted.
+		var effectiveRegistrations = new Dictionary<Type, ServiceDescriptor>();
+		foreach (var descriptor in services) {
+			if (descriptor.IsKeyedService || descriptor.ServiceType.IsGenericTypeDefinition) {
+				continue;
+			}
+			effectiveRegistrations[descriptor.ServiceType] = descriptor;
+		}
+
+		foreach (var (registeredType, descriptor) in effectiveRegistrations) {
+			if (registeredType == typeof(AutoInitializeManifest)) {
+				continue;
+			}
+			var carriesMarker =
+				serviceType.IsAssignableFrom(registeredType)
+				|| (descriptor.ImplementationType is { } implementationType && serviceType.IsAssignableFrom(implementationType))
+				|| (descriptor.ImplementationInstance is { } instance && serviceType.IsInstanceOfType(instance));
+			if (carriesMarker) {
+#if DEBUG
+				Console.WriteLine($"	Tracking {registeredType.Name} for auto-initialization (marked registration)...");
+#endif
+				manifest.Track(registeredType);
+			}
+		}
 	}
 
 	/// <summary>
