@@ -24,7 +24,8 @@ Cirreum.Startup allows developers to define one or more classes that implement s
 - Purpose: Allows existing services to be automatically initialized during application startup.
 - Execution Order: Runs after ISystemInitializer and before IStartupTask.
 - Usage: Useful for services that need initialization before they can be used.
-- Auto-registration: The system attempts to auto-register services implementing this interface.
+- Auto-registration: The system attempts to auto-register services implementing this interface — a registration your application already made always wins and is used as-is.
+- Fail-fast: A tracked service that no longer resolves to an `IAutoInitialize` at startup (its registration was removed or replaced) fails the host with an actionable error rather than being silently skipped. To deliberately opt a container out of auto-initialization, call `ClearAutoInitializeServices()` on its service provider.
 
 ### 3. IStartupTask
 
