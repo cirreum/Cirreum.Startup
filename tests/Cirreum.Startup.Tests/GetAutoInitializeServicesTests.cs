@@ -201,6 +201,21 @@ public class GetAutoInitializeServicesTests {
 	}
 
 	[Fact]
+	public void NonConformingOccupierOfADiscoveredImplementationsInterface_FailsLoudlyAtScan() {
+		// End-to-end through the real scan: the app pre-registered a non-conforming
+		// implementation on the interface the discovered GadgetProbe pairs to — the
+		// discovered implementation would be silently dropped and nothing would
+		// initialize for the slot, so the scan itself fails loudly.
+		var services = new ServiceCollection();
+		services.AddSingleton<IGadgetProbe, PlainGadgetProbe>();
+
+		var act = () => services.AddApplicationInitializers();
+
+		act.Should().Throw<InvalidOperationException>()
+			.WithMessage($"*{typeof(PlainGadgetProbe).FullName}*does not implement*");
+	}
+
+	[Fact]
 	public void AbstractImplementations_AreExcludedFromTheScan() {
 		var services = new ServiceCollection();
 

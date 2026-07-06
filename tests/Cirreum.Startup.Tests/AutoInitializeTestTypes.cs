@@ -33,6 +33,12 @@ internal sealed class GadgetProbe : IGadgetProbe, IAutoInitialize {
 /// scan; used as a non-conforming replacement/factory product.</summary>
 internal sealed class PlainGadgetProbe : IGadgetProbe;
 
+/// <summary>A conforming alternate implementation of the gadget-probe interface —
+/// open generic, so scan-invisible; drives the conforming-displacement seam tests.</summary>
+internal sealed class GadgetProbeAlternate<T> : IGadgetProbe, IAutoInitialize {
+	public ValueTask InitializeAsync() => ValueTask.CompletedTask;
+}
+
 /// <summary>Non-conforming, scan-invisible implementation of the sweep-test interface —
 /// used to shadow a marked registration for the cardinality tests.</summary>
 internal sealed class PlainScopedWidget : IScopedWidget;

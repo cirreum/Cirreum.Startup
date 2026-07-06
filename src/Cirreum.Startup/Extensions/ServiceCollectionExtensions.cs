@@ -1,4 +1,4 @@
-namespace Microsoft.Extensions.DependencyInjection;
+﻿namespace Microsoft.Extensions.DependencyInjection;
 
 using Cirreum.Startup;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -128,7 +128,7 @@ public static class ServiceCollectionExtensions {
 
 			if (isAutoInitService) {
 
-				services.RegisterAutoInitializeCandidate(serviceType, implementationType, serviceLifetime, preExisting!);
+				services.RegisterAutoInitializeCandidate(implementationType, serviceLifetime, preExisting!);
 
 			} else {
 #if DEBUG
@@ -144,7 +144,7 @@ public static class ServiceCollectionExtensions {
 		}
 
 		if (isAutoInitService) {
-			services.TrackMarkedRegistrations(serviceType);
+			services.TrackMarkedRegistrations();
 		}
 
 		return services;
@@ -180,7 +180,9 @@ public static class ServiceCollectionExtensions {
 	/// </remarks>
 	/// <exception cref="InvalidOperationException">A tracked service identity has more
 	/// than one registration in this collection.</exception>
-	internal static void TrackMarkedRegistrations(this IServiceCollection services, Type serviceType) {
+	internal static void TrackMarkedRegistrations(this IServiceCollection services) {
+
+		var markerType = typeof(IAutoInitialize);
 
 		var manifest = GetOrAddManifest(services);
 
@@ -197,9 +199,9 @@ public static class ServiceCollectionExtensions {
 			registrationCounts[descriptor.ServiceType] =
 				registrationCounts.GetValueOrDefault(descriptor.ServiceType) + 1;
 			var carriesMarker =
-				serviceType.IsAssignableFrom(descriptor.ServiceType)
-				|| (descriptor.ImplementationType is { } implementationType && serviceType.IsAssignableFrom(implementationType))
-				|| (descriptor.ImplementationInstance is { } instance && serviceType.IsInstanceOfType(instance));
+				markerType.IsAssignableFrom(descriptor.ServiceType)
+				|| (descriptor.ImplementationType is { } implementationType && markerType.IsAssignableFrom(implementationType))
+				|| (descriptor.ImplementationInstance is { } instance && markerType.IsInstanceOfType(instance));
 			if (carriesMarker) {
 				markedTypes.Add(descriptor.ServiceType);
 			}
@@ -237,33 +239,43 @@ public static class ServiceCollectionExtensions {
 	/// as-is; otherwise the implementation registers under its primary interface.
 	/// </summary>
 	/// <param name="services">The service collection being composed.</param>
-	/// <param name="serviceType">The auto-initialize marker (<see cref="IAutoInitialize"/>).</param>
-	/// <param name="implementationType">The discovered implementation.</param>
+	/// <param name="implementationType">The discovered <see cref="IAutoInitialize"/>
+	/// implementation. The service <em>identity</em> is never passed in — it is derived
+	/// (the primary interface, by naming convention) or found (the try-first
+	/// descriptor).</param>
 	/// <param name="serviceLifetime">Lifetime for a registration this method creates.</param>
 	/// <param name="preExisting">The descriptors that existed before the scan started —
 	/// a pre-existing registration holding the primary interface is the application's
-	/// deliberate choice and wins (the interface is still tracked; the loud resolution
-	/// phase vets what it produces). Only a collision the scan itself created is
-	/// ambiguous.</param>
+	/// deliberate composition and wins <em>when it provably auto-initializes</em>
+	/// (quiet displacement: the slot still initializes, with the app's chosen
+	/// implementation). Only a collision the scan itself created, or a pre-existing
+	/// occupier that provably cannot initialize, is an error.</param>
 	/// <exception cref="InvalidOperationException">The implementation's primary
-	/// interface was claimed <em>during this same scan</em> by a different
-	/// implementation that also implements the marker — an ambiguity <c>TryAdd</c>
-	/// semantics cannot honor; the application must resolve it by registering its
-	/// choice manually.</exception>
+	/// interface was claimed <em>during this same scan</em> by a different discovered
+	/// implementation (ambiguity <c>TryAdd</c> cannot honor), OR it is held by a
+	/// pre-existing registration that does <em>not</em> conform — the discovered
+	/// implementation would be silently dropped and nothing would auto-initialize for
+	/// the slot.</exception>
 	internal static void RegisterAutoInitializeCandidate(
 		this IServiceCollection services,
-		Type serviceType,
 		Type implementationType,
 		ServiceLifetime serviceLifetime,
 		IReadOnlySet<ServiceDescriptor> preExisting) {
 
+		var markerType = typeof(IAutoInitialize);
 		var manifest = GetOrAddManifest(services);
 
+		// Try-first: is the discovered implementation itself already registered? An
+		// instance must actually BE the implementation (an instance of a DIFFERENT type
+		// must not masquerade as it — that's a displacement, judged below). A factory is
+		// opaque, so an assignable factory is presumed to produce the implementation and
+		// the loud resolution phase verifies what it actually yields.
 		var foundSvcDescriptor = services.FirstOrDefault(d =>
 			d.IsKeyedService is false &&
 			(
 				(d.ImplementationType is not null && d.ImplementationType.Equals(implementationType)) ||
-				((d.ImplementationFactory is not null || d.ImplementationInstance is not null) && d.ServiceType.IsAssignableFrom(implementationType))
+				(d.ImplementationInstance is not null && implementationType.IsInstanceOfType(d.ImplementationInstance)) ||
+				(d.ImplementationFactory is not null && d.ServiceType.IsAssignableFrom(implementationType))
 			));
 
 		if (foundSvcDescriptor is not null) {
@@ -284,7 +296,7 @@ public static class ServiceCollectionExtensions {
 			Console.WriteLine($"	{item.Name}");
 		}
 #endif
-		var primaryInterface = FindPrimaryInterface(implementationType, serviceType, primaryInterfaces) ??
+		var primaryInterface = FindPrimaryInterface(implementationType, markerType, primaryInterfaces) ??
 			throw new InvalidOperationException(
 				$"Cannot auto-register {implementationType.FullName}: no conventionally-named primary " +
 				$"interface was found (for IMyService, the implementation should be named MyService). " +
@@ -303,31 +315,63 @@ public static class ServiceCollectionExtensions {
 				primaryInterface,
 				implementationType,
 				serviceLifetime));
-		} else if (!preExisting.Contains(existingForInterface)
-			&& existingForInterface.ImplementationType is { } existingImplementation
-			&& serviceType.IsAssignableFrom(existingImplementation)) {
-			// Two DISCOVERED implementations selected the same primary interface within
-			// this scan — TryAdd semantics can honor only one, and scan order is not a
-			// contract. Fail fast; the application resolves the ambiguity by registering
-			// its choice manually (which the pre-existing paths then honor).
+		} else if (!preExisting.Contains(existingForInterface)) {
+			// Claimed DURING this scan by a different discovered implementation —
+			// TryAdd semantics can honor only one, and scan order is not a contract.
+			// Fail fast; the application resolves the ambiguity by registering its
+			// choice manually (which the pre-existing paths then honor).
 			throw new InvalidOperationException(
 				$"Cannot auto-register {implementationType.FullName}: its primary interface " +
-				$"{primaryInterface.FullName} is already registered to {existingImplementation.FullName}, " +
-				$"which also implements {serviceType.Name}. Two auto-initialize implementations cannot " +
-				"share a primary interface — register the one you want manually, before " +
-				"AddApplicationInitializers, to resolve the ambiguity.");
+				$"{primaryInterface.FullName} was claimed during this scan by " +
+				$"{DescribeOccupier(existingForInterface)}, another discovered {markerType.Name} " +
+				"implementation. Two auto-initialize implementations cannot share a primary " +
+				"interface — register the one you want manually, before AddApplicationInitializers, " +
+				"to resolve the ambiguity.");
+		} else if (!OccupierProvablyConforms(existingForInterface, markerType, primaryInterface)) {
+			// A PRE-EXISTING registration holds the interface but provably cannot
+			// auto-initialize: the discovered implementation would be silently dropped
+			// AND nothing would initialize for this slot. Intent is unknowable, but this
+			// shape can never be the deliberate conforming-replacement case — loud.
+			throw new InvalidOperationException(
+				$"Cannot auto-register {implementationType.FullName}: its primary interface " +
+				$"{primaryInterface.FullName} is already registered to " +
+				$"{DescribeOccupier(existingForInterface)}, which does not implement " +
+				$"{markerType.Name} — the discovered implementation would be silently dropped " +
+				"and nothing would auto-initialize for this service. Remove or replace the " +
+				$"conflicting registration, implement {markerType.Name} on it, or register " +
+				$"{implementationType.Name} yourself under its own identity if both services " +
+				"should exist.");
 		}
-		// else: the interface is held by a PRE-EXISTING registration (the application's
-		// deliberate choice — a different conforming implementation, a factory, or an
-		// instance). Leave the registration alone and track the interface: a conforming
-		// implementation initializes normally, and a non-conforming one fails loudly at
-		// resolution.
+		// else: a PRE-EXISTING registration that provably conforms — the application's
+		// deliberate replacement of the discovered implementation. Quiet displacement:
+		// the slot still auto-initializes, with the app's chosen implementation.
 
 #if DEBUG
 		Console.WriteLine($"	Tracking {primaryInterface.Name} for auto-initialization...");
 #endif
 		manifest.Track(primaryInterface);
 	}
+
+	/// <summary>
+	/// Whether a pre-existing registration occupying a discovered implementation's
+	/// primary interface is <em>provably</em> auto-initializable: the interface itself
+	/// carries the marker (structural — every implementation conforms), or the
+	/// descriptor's implementation type / instance does. Factories never reach this
+	/// check — an assignable factory matches the try-first path and is verified at
+	/// resolution instead.
+	/// </summary>
+	private static bool OccupierProvablyConforms(
+		ServiceDescriptor occupier,
+		Type markerType,
+		Type primaryInterface) =>
+		markerType.IsAssignableFrom(primaryInterface)
+		|| (occupier.ImplementationType is { } implementationType && markerType.IsAssignableFrom(implementationType))
+		|| (occupier.ImplementationInstance is { } instance && markerType.IsInstanceOfType(instance));
+
+	private static string DescribeOccupier(ServiceDescriptor occupier) =>
+		occupier.ImplementationType?.FullName
+			?? occupier.ImplementationInstance?.GetType().FullName
+			?? "a factory registration";
 
 	private static AutoInitializeManifest GetOrAddManifest(IServiceCollection services) {
 		foreach (var descriptor in services) {
