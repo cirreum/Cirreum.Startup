@@ -12,9 +12,6 @@ using System.Reflection;
 /// </summary>
 public static class ServiceCollectionExtensions {
 
-	private static readonly Lock AutoInitializeLock = new();
-	internal static List<Type> AutoInitializeServices = [];
-
 	/// <summary>
 	/// Register all types that implement <see cref="ISystemInitializer"/>,
 	/// <see cref="IAutoInitialize"/> or <see cref="IStartupTask"/> with
@@ -48,31 +45,70 @@ public static class ServiceCollectionExtensions {
 	}
 
 	/// <summary>
-	/// Resolves all the registered <see cref="IAutoInitialize"/> services.
+	/// Resolves all the <see cref="IAutoInitialize"/> services tracked by this
+	/// container's registration scan (ADR-0028).
 	/// </summary>
 	/// <param name="sp">The <see cref="IServiceProvider"/> that will provide the service implementations.</param>
-	/// <returns>The enumerable collection of services.</returns>
+	/// <returns>The materialized collection of services, in tracking order, deduplicated
+	/// by instance. Empty when <c>AddApplicationInitializers</c> never ran for this
+	/// container's collection.</returns>
+	/// <remarks>
+	/// Resolution is deliberately loud: auto-registration is best-effort (a manual app
+	/// registration wins), but by resolution time every tracked type must produce an
+	/// <see cref="IAutoInitialize"/> — a registration that was removed, or replaced with
+	/// an implementation that doesn't implement the contract, fails here with an
+	/// actionable error rather than being silently skipped. The deliberate opt-out is
+	/// <see cref="ClearAutoInitializeServices"/>.
+	/// </remarks>
+	/// <exception cref="InvalidOperationException">A tracked service type no longer
+	/// resolves, or resolves to an implementation that does not implement
+	/// <see cref="IAutoInitialize"/>.</exception>
 	public static IEnumerable<IAutoInitialize> GetAutoInitializeServices(this IServiceProvider sp) {
-		Type[] snapshot;
-		lock (AutoInitializeLock) {
-			snapshot = [.. AutoInitializeServices];
+		ArgumentNullException.ThrowIfNull(sp);
+
+		var manifest = sp.GetService<AutoInitializeManifest>();
+		if (manifest is null) {
+			return [];
 		}
-		foreach (var svc in snapshot) {
-			var castedSvc = sp.GetRequiredService(svc) as IAutoInitialize;
-			if (castedSvc is not null) {
-				yield return castedSvc;
+
+		var resolvedServices = new List<IAutoInitialize>();
+		var seen = new HashSet<IAutoInitialize>(ReferenceEqualityComparer.Instance);
+		foreach (var serviceType in manifest.Snapshot()) {
+
+			var resolved = sp.GetService(serviceType)
+				?? throw new InvalidOperationException(
+					$"Auto-initialization tracked '{serviceType.FullName}', but it no longer resolves " +
+					"from this container — its registration was removed after the registration scan. " +
+					"Re-register it, or opt out of auto-initialization for this container via " +
+					$"{nameof(ClearAutoInitializeServices)}().");
+
+			if (resolved is not IAutoInitialize autoInitialize) {
+				throw new InvalidOperationException(
+					$"Auto-initialization tracked '{serviceType.FullName}', but it resolved to " +
+					$"'{resolved.GetType().FullName}', which does not implement {nameof(IAutoInitialize)} — " +
+					"its registration was replaced after the registration scan. Implement " +
+					$"{nameof(IAutoInitialize)} on the replacement, or opt out for this container via " +
+					$"{nameof(ClearAutoInitializeServices)}().");
+			}
+
+			if (seen.Add(autoInitialize)) {
+				resolvedServices.Add(autoInitialize);
 			}
 		}
+
+		return resolvedServices;
 	}
 
 	/// <summary>
-	/// Removes any <see cref="IAutoInitialize"/> service implementation
-	/// being tracked for initialization.
+	/// Clears the <see cref="IAutoInitialize"/> tracking for <em>this container</em> —
+	/// the deliberate opt-out from auto-initialization. Registrations themselves are
+	/// untouched; the services simply stop being auto-initialized.
 	/// </summary>
-	public static void ClearAutoInitializeServices(this IServiceProvider _) {
-		lock (AutoInitializeLock) {
-			AutoInitializeServices.Clear();
-		}
+	/// <param name="sp">The container whose tracking is cleared. Other containers in the
+	/// same process are unaffected.</param>
+	public static void ClearAutoInitializeServices(this IServiceProvider sp) {
+		ArgumentNullException.ThrowIfNull(sp);
+		sp.GetService<AutoInitializeManifest>()?.Clear();
 	}
 
 
@@ -82,58 +118,17 @@ public static class ServiceCollectionExtensions {
 		bool isAutoInitService = false) {
 
 		var serviceType = typeof(TServiceType);
+
+		// Snapshot what the APP registered before this scan — pre-existing registrations
+		// are deliberate composition and always win; only collisions the scan itself
+		// creates are ambiguous (see RegisterAutoInitializeCandidate).
+		HashSet<ServiceDescriptor>? preExisting = isAutoInitService ? [.. services] : null;
+
 		foreach (var implementationType in DiscoverServiceImplementations(serviceType)) {
 
 			if (isAutoInitService) {
 
-				var foundSvcDescriptor = services.FirstOrDefault(d =>
-					d.IsKeyedService is false &&
-					(
-						(d.ImplementationType is not null && d.ImplementationType.Equals(implementationType)) ||
-						((d.ImplementationFactory is not null || d.ImplementationInstance is not null) && d.ServiceType.IsAssignableFrom(implementationType))
-					));
-
-				if (foundSvcDescriptor is not null) {
-#if DEBUG
-					Console.WriteLine($"Found existing registered service ({foundSvcDescriptor.ServiceType.Name}) for {implementationType.Name}, and will use it!");
-					Console.WriteLine($"	Tracking {foundSvcDescriptor.ServiceType.Name} for auto-initialization...");
-#endif
-					lock (AutoInitializeLock) {
-						AutoInitializeServices.Add(foundSvcDescriptor.ServiceType);
-					}
-
-				} else {
-#if DEBUG
-					Console.WriteLine($"Scanning interfaces for: {implementationType.Name} ...");
-#endif
-					var primaryInterfaces = implementationType.GetImmediateInterfaces();
-#if DEBUG
-					foreach (var item in primaryInterfaces) {
-						Console.WriteLine($"	{item.Name}");
-					}
-#endif
-					var primaryInterface = FindPrimaryInterface(implementationType, serviceType, primaryInterfaces) ??
-						throw new Exception(
-							$"Cannot register {implementationType.Name} without a properly named primary interface. " +
-							$"Candidates considered: {string.Join(", ", primaryInterfaces.Select(i => i.Name))}.");
-
-#if DEBUG
-					Console.WriteLine($"			{primaryInterface.Name} chosen as the service interface to register.");
-#endif
-					services.TryAdd(new ServiceDescriptor(
-						primaryInterface,
-						implementationType,
-						serviceLifetime));
-
-#if DEBUG
-					Console.WriteLine($"	Tracking {primaryInterface.Name} for auto-initialization...");
-#endif
-					lock (AutoInitializeLock) {
-						AutoInitializeServices.Add(primaryInterface);
-					}
-
-				}
-
+				services.RegisterAutoInitializeCandidate(serviceType, implementationType, serviceLifetime, preExisting!);
 
 			} else {
 #if DEBUG
@@ -150,6 +145,114 @@ public static class ServiceCollectionExtensions {
 
 		return services;
 
+	}
+
+	/// <summary>
+	/// Try-first registration of a discovered auto-initialize implementation, plus
+	/// tracking in this collection's <see cref="AutoInitializeManifest"/> (ADR-0028).
+	/// An existing application registration of the implementation wins and is tracked
+	/// as-is; otherwise the implementation registers under its primary interface.
+	/// </summary>
+	/// <param name="services">The service collection being composed.</param>
+	/// <param name="serviceType">The auto-initialize marker (<see cref="IAutoInitialize"/>).</param>
+	/// <param name="implementationType">The discovered implementation.</param>
+	/// <param name="serviceLifetime">Lifetime for a registration this method creates.</param>
+	/// <param name="preExisting">The descriptors that existed before the scan started —
+	/// a pre-existing registration holding the primary interface is the application's
+	/// deliberate choice and wins (the interface is still tracked; the loud resolution
+	/// phase vets what it produces). Only a collision the scan itself created is
+	/// ambiguous.</param>
+	/// <exception cref="InvalidOperationException">The implementation's primary
+	/// interface was claimed <em>during this same scan</em> by a different
+	/// implementation that also implements the marker — an ambiguity <c>TryAdd</c>
+	/// semantics cannot honor; the application must resolve it by registering its
+	/// choice manually.</exception>
+	internal static void RegisterAutoInitializeCandidate(
+		this IServiceCollection services,
+		Type serviceType,
+		Type implementationType,
+		ServiceLifetime serviceLifetime,
+		IReadOnlySet<ServiceDescriptor> preExisting) {
+
+		var manifest = GetOrAddManifest(services);
+
+		var foundSvcDescriptor = services.FirstOrDefault(d =>
+			d.IsKeyedService is false &&
+			(
+				(d.ImplementationType is not null && d.ImplementationType.Equals(implementationType)) ||
+				((d.ImplementationFactory is not null || d.ImplementationInstance is not null) && d.ServiceType.IsAssignableFrom(implementationType))
+			));
+
+		if (foundSvcDescriptor is not null) {
+#if DEBUG
+			Console.WriteLine($"Found existing registered service ({foundSvcDescriptor.ServiceType.Name}) for {implementationType.Name}, and will use it!");
+			Console.WriteLine($"	Tracking {foundSvcDescriptor.ServiceType.Name} for auto-initialization...");
+#endif
+			manifest.Track(foundSvcDescriptor.ServiceType);
+			return;
+		}
+
+#if DEBUG
+		Console.WriteLine($"Scanning interfaces for: {implementationType.Name} ...");
+#endif
+		var primaryInterfaces = implementationType.GetImmediateInterfaces();
+#if DEBUG
+		foreach (var item in primaryInterfaces) {
+			Console.WriteLine($"	{item.Name}");
+		}
+#endif
+		var primaryInterface = FindPrimaryInterface(implementationType, serviceType, primaryInterfaces) ??
+			throw new Exception(
+				$"Cannot register {implementationType.Name} without a properly named primary interface. " +
+				$"Candidates considered: {string.Join(", ", primaryInterfaces.Select(i => i.Name))}.");
+
+#if DEBUG
+		Console.WriteLine($"			{primaryInterface.Name} chosen as the service interface to register.");
+#endif
+		var existingForInterface = services.FirstOrDefault(d =>
+			d.IsKeyedService is false && d.ServiceType == primaryInterface);
+
+		if (existingForInterface is null) {
+			services.TryAdd(new ServiceDescriptor(
+				primaryInterface,
+				implementationType,
+				serviceLifetime));
+		} else if (!preExisting.Contains(existingForInterface)
+			&& existingForInterface.ImplementationType is { } existingImplementation
+			&& serviceType.IsAssignableFrom(existingImplementation)) {
+			// Two DISCOVERED implementations selected the same primary interface within
+			// this scan — TryAdd semantics can honor only one, and scan order is not a
+			// contract. Fail fast; the application resolves the ambiguity by registering
+			// its choice manually (which the pre-existing paths then honor).
+			throw new InvalidOperationException(
+				$"Cannot auto-register {implementationType.FullName}: its primary interface " +
+				$"{primaryInterface.FullName} is already registered to {existingImplementation.FullName}, " +
+				$"which also implements {serviceType.Name}. Two auto-initialize implementations cannot " +
+				"share a primary interface — register the one you want manually, before " +
+				"AddApplicationInitializers, to resolve the ambiguity.");
+		}
+		// else: the interface is held by a PRE-EXISTING registration (the application's
+		// deliberate choice — a different conforming implementation, a factory, or an
+		// instance). Leave the registration alone and track the interface: a conforming
+		// implementation initializes normally, and a non-conforming one fails loudly at
+		// resolution.
+
+#if DEBUG
+		Console.WriteLine($"	Tracking {primaryInterface.Name} for auto-initialization...");
+#endif
+		manifest.Track(primaryInterface);
+	}
+
+	private static AutoInitializeManifest GetOrAddManifest(IServiceCollection services) {
+		foreach (var descriptor in services) {
+			if (descriptor.ServiceType == typeof(AutoInitializeManifest)
+				&& descriptor.ImplementationInstance is AutoInitializeManifest existing) {
+				return existing;
+			}
+		}
+		var manifest = new AutoInitializeManifest();
+		services.AddSingleton(manifest);
+		return manifest;
 	}
 
 	/// <summary>
@@ -214,13 +317,23 @@ public static class ServiceCollectionExtensions {
 				.GetTypes()
 				.Where(t => IsImplemented(serviceType, t));
 		} catch (ReflectionTypeLoadException ex) {
-			return ex.Types.Where(t => t is not null).Select(t => t!);
+			// The loadable subset still needs the implements-filter — returning it
+			// unfiltered would register arbitrary types as initializers and fail the
+			// provider build far from the cause.
+			return ex.Types
+				.Where(t => t is not null && IsImplemented(serviceType, t))
+				.Select(t => t!);
 		} catch {
 			return [];
 		}
 	}
 	private static bool IsImplemented(Type serviceType, Type implementationType) =>
-		implementationType.IsClass && serviceType.IsAssignableFrom(implementationType);
+		implementationType.IsClass
+		&& !implementationType.IsAbstract
+		// A generic type definition cannot be activated (and cannot register under a
+		// non-generic service type) — a closed form must be registered manually.
+		&& !implementationType.IsGenericTypeDefinition
+		&& serviceType.IsAssignableFrom(implementationType);
 	private static bool ReferencesMyLib(Assembly assembly) =>
 		assembly.GetReferencedAssemblies().Any(a => a.Name == ApplicationInitializer.LibName);
 	private static HashSet<Type> GetImmediateInterfaces(this Type type) {

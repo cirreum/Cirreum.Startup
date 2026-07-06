@@ -19,22 +19,4 @@ consumer upgrade, a coordinated multi-repo rollout).
 
 ## Queued
 
-### Initializer scan: re-filter the `ReflectionTypeLoadException` fallback and exclude abstract types
-
-**SemVer:** Patch
-**Trigger:** Next Cirreum.Startup release.
-**Noted:** 2026-07-05
-
-Two hardening gaps in the initializer scan (`Extensions/ServiceCollectionExtensions.cs`),
-found during the ADR-0025 adversarial review of `Cirreum.Runtime.Authentication`'s
-`ISystemInitializer` bootstrap:
-
-1. The `ReflectionTypeLoadException` fallback returns the assembly's loadable types
-   **without re-applying the `IsImplemented` predicate**, so a partially-loadable
-   assembly gets arbitrary types registered as initializer descriptors — the provider
-   build then fails with a confusing "type can't be converted to service type" error
-   far from the cause. Apply the predicate to `ex.Types` (nulls filtered) in the
-   fallback.
-2. `IsImplemented` doesn't exclude abstract classes, so an abstract base implementing
-   `ISystemInitializer`/`IAutoInitialize`/`IStartupTask` would be registered and fail
-   at activation. Add `!type.IsAbstract`.
+_Nothing queued._

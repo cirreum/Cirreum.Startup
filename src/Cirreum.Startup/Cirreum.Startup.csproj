@@ -10,4 +10,8 @@
 		<PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.16.0" />
 	</ItemGroup>
 
+	<ItemGroup>
+		<InternalsVisibleTo Include="Cirreum.Startup.Tests" />
+	</ItemGroup>
+
 </Project>
