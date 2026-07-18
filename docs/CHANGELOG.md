@@ -12,6 +12,8 @@ guides linked at the bottom of each entry.
 
 ## [Unreleased]
 
+## [1.0.122] - 2026-07-18
+
 ### Fixed
 
 - **Auto-initialize tracking is now container-scoped (ADR-0028).** The process-global static tracking list is gone — `AddApplicationInitializers()` records tracked service types in an internal manifest registered into the same service collection, so multiple hosts in one process are fully isolated: no cross-container resolution failures, no global wipes, no double initialization when the registration scan runs twice. `ClearAutoInitializeServices()` keeps its signature but now clears *this container's* tracking only — the deliberate per-container opt-out it always advertised.
